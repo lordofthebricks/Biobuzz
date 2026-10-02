@@ -41,6 +41,10 @@ public class PollenNectarAuto extends LinearOpMode {
     public static int TARGETS_TO_COLLECT = 3;
     public static double TIME_LIMIT_S = 28.0;       // leave a little of the 30 s for parking
 
+    // Save candidate crops every N camera frames for retraining (0 = off). Turn this on in
+    // practice/scrimmage matches to collect training images from real gameplay.
+    public static int CAPTURE_EVERY_N_FRAMES = 0;
+
     // Vision filtering
     public static int CONFIRM_FRAMES = 2;           // consecutive frames before a sighting is trusted
     public static double STALE_RESULT_MS = 500;     // ignore results older than this
@@ -64,7 +68,7 @@ public class PollenNectarAuto extends LinearOpMode {
     public static double ALIGN_TOLERANCE = 0.2;
     public static double APPROACH_POWER = 0.35;
     public static double APPROACH_STEER_KP = 0.3;
-    public static double NEAR_Y = 0.7;              // centroid this low in the image = close enough
+    public static double NEAR_Y = 0.85;             // object's bottom edge this low in the image = close enough
     public static double APPROACH_TIMEOUT_S = 4.0;
 
     // Collect
@@ -107,6 +111,7 @@ public class PollenNectarAuto extends LinearOpMode {
         intake = hardwareMap.tryGet(DcMotor.class, "intake");
 
         PollenNectarProcessor.Settings settings = new PollenNectarProcessor.Settings();
+        settings.autoCaptureEveryNFrames = CAPTURE_EVERY_N_FRAMES;
         try {
             vision = new PollenNectarProcessor(hardwareMap.appContext, settings);
         } catch (Exception e) {

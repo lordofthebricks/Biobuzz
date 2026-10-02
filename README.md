@@ -12,8 +12,8 @@ folder into the `TeamCode` module of your
 | File | What it does |
 |---|---|
 | `PollenNectarAuto.java` | **The autonomous.** Search, align, approach, collect, repeat |
-| `PollenNectarVisionTest.java` | TeleOp: drive around and watch the model's output to check and tune it |
-| `PollenNectarProcessor.java` | VisionPortal processor that turns classifications into target positions |
+| `PollenNectarVisionTest.java` | TeleOp: watch the model's output, tune it, and **capture training images** |
+| `PollenNectarProcessor.java` | VisionPortal processor: color filter → crop → classify → target positions |
 | `TeachableMachineClassifier.java` | Loads and runs the Teachable Machine `.tflite` model |
 | `MecanumDrive.java` | Mecanum drive and IMU heading |
 
@@ -21,24 +21,39 @@ folder into the `TeamCode` module of your
 
 ## How it finds things
 
-Teachable Machine trains an image **classifier**: it says *what* is in a picture, not *where*.
-To get a location, each camera frame is cut into a grid (3 columns × 2 rows by default), and
-every cell is classified separately:
+The field never looks the same twice. Robots, scored pieces, people at the wall and lighting
+all change from match to match and during a match. A model shown whole scenes would have to
+learn every possible background, so this code **never asks Teachable Machine to look at the
+whole scene**:
 
 ```
-+---------+---------+---------+
-|  Bkgnd  | Pollen  |  Bkgnd  |   top row    = far away
-+---------+---------+---------+
-|  Bkgnd  | Pollen  | Nectar  |   bottom row = close (camera tilted down)
-+---------+---------+---------+
-  turn left  straight  turn right
+ camera frame ──▶ 1. PROPOSE ──▶ 2. CROP ──▶ 3. CLASSIFY ──▶ x, y of each Pollen / Nectar
+                  OpenCV color    tight square   Teachable Machine:
+                  filter finds    crop around    Pollen / Nectar / Other
+                  colored blobs   each blob
 ```
 
-Cells that score above `minConfidence` are combined into a weighted centroid for each label:
+1. **Propose:** FTC tiles are gray, so a cheap HSV color filter picks out colored blobs as
+   candidates. By default it takes anything clearly colored. Narrow `candidateRanges` once you
+   know the game pieces' colors.
+2. **Crop:** each blob is cut out as a tight square with a little padding. The object fills
+   most of the crop, so whatever is behind it barely affects the result.
+3. **Classify:** the model only has to answer "is this blob Pollen, Nectar, or Other?" *Other*
+   only needs to cover things that pass the color filter (robot parts, alliance tape, field
+   elements), which is a much smaller set than "the whole field".
 
-* **x** (−1 … +1) shows how far left or right the target is. The robot turns until x ≈ 0.
-* **y** (0 … 1) shows how low the target is in the image. Lower means closer. The robot drives
-  forward until `y ≥ NEAR_Y`, then collects.
+A crop counts only if its top label scores at least `minConfidence` **and** beats the
+runner-up by `minMargin`. If the model is unsure, the crop is ignored rather than chased.
+The robot also needs `CONFIRM_FRAMES` frames in a row before it commits.
+
+Each sighting gives:
+
+* **x** (−1 … +1) shows how far left or right the object's center is. The robot turns until
+  x ≈ 0.
+* **y** (0 … 1) shows how low the object's bottom edge is in the image. With the camera
+  tilted down, lower means closer. The robot drives until `y ≥ NEAR_Y`, then collects.
+
+If there are several of the same target, it goes for the closest one.
 
 ### Autonomous state machine
 
@@ -54,23 +69,45 @@ SEARCH ──seen──▶ ALIGN ──centered──▶ APPROACH ──close─
 
 ## 1. Train the model in Teachable Machine
 
+The model is trained on **crops from the robot's own camera**, not on photos of the whole
+field. The vision test OpMode saves those crops for you.
+
+### First model (bootstrapping)
+
 1. Go to <https://teachablemachine.withgoogle.com/> → **Get Started** → **Image Project** →
    **Standard image model**.
 2. Create these classes. **The names must match** `POLLEN_LABEL` / `NECTAR_LABEL` in
    `PollenNectarAuto.java` (not case-sensitive):
    * `Pollen`
    * `Nectar`
-   * `Background`: empty field tiles, walls, robots, field elements. **This class is
-     essential.** Without it, every cell gets labeled pollen or nectar.
-3. Collect images **with the robot's own webcam at its real mounting angle** if you can
-   (for example, save frames from the vision test OpMode, or plug the webcam into a laptop). Aim for 150+ images
-   per class, with:
-   * game pieces at different distances, angles and positions in the frame
-   * **partial views**, because the grid often cuts an object in half
-   * close-up shots that roughly match one grid cell (about ⅓ of the frame width)
-   * different lighting conditions
-4. Click **Train Model**. Test with the preview and add more images where it's wrong.
-5. **Export Model** → **Tensorflow Lite** tab → **Floating point** → **Download my model**.
+   * `Other`: anything colored that *isn't* a target, such as robot parts, alliance-colored
+     tape and field elements, bumpers, and the edges of other game pieces.
+3. For a first model you can take close-up photos with a laptop webcam, holding each piece
+   so it fills most of the square preview. Vary the angle, distance, lighting and what's
+   behind it.
+4. **Train Model**, then export it (step 5 below) and put it on the robot.
+
+### Retraining from real gameplay (do this often)
+
+This is how the model keeps up with a changing field:
+
+1. Run **Biobuzz: Vision Test**. Drive around a field set up like a real match, with other
+   robots, scored pieces and people at the walls. Press **A** to save a snapshot, or **B** to
+   save continuously.
+   For real matches and scrimmages, set `CAPTURE_EVERY_N_FRAMES` (for example 15) in
+   `PollenNectarAuto.java` so the auto collects crops while it runs.
+2. Pull the images off the Control Hub:
+   `adb pull /sdcard/FIRST/biobuzz-captures/ ./captures`
+3. Sort the `*_crop*.png` files into Pollen / Nectar / Other folders. These are exactly the
+   224×224 crops the model sees. Pay attention to the **mistakes**. Every false
+   detection you put into *Other* teaches the model something new.
+4. Upload each folder to its class in Teachable Machine. Use **Save project to Drive** so
+   you can keep adding images all season. Then retrain and re-export.
+5. Delete the old captures: `adb shell rm -r /sdcard/FIRST/biobuzz-captures/`
+
+### Export
+
+1. **Export Model** → **Tensorflow Lite** tab → **Floating point** → **Download my model**.
    The zip contains `model_unquant.tflite` and `labels.txt`. (*Quantized* also works and runs
    faster. If you use it, set `settings.modelFile` to that file's name, usually `model.tflite`.)
 
@@ -115,22 +152,44 @@ mounted. If the robot doesn't drive forward on `drive(1, 0, 0)`, flip the motor 
 ## 5. Test, tune, run
 
 1. Run **Biobuzz: Vision Test** (TeleOp). Open the camera stream on the Driver Station during
-   INIT, or watch the Robot Controller screen. Each grid cell shows its best label and score.
-   * Raise `minConfidence` in `PollenNectarProcessor.Settings` if you see false detections.
-     Lower it if real targets are missed.
+   INIT, or watch the Robot Controller screen. **Gray boxes** are candidates from the color
+   filter. **Yellow and cyan boxes** are crops the model accepted as Pollen or Nectar.
+   * **A target has no box at all:** the color filter missed it. Widen `candidateRanges` or
+     lower `minCandidateArea`.
+   * **Too many gray boxes (low FPS):** narrow `candidateRanges` to the game pieces' colors,
+     or lower `maxCandidates`. Each candidate costs one model run.
+   * **Wrong labels:** capture with **A**, add those crops to the right class, retrain.
    * Park the robot where collecting should start and note the sighting's `y`. Use that as
      `NEAR_Y`.
-   * Watch the FPS. Each grid cell is one model run. If it's too slow, use a quantized model
-     or fewer cells. For finer steering, try `columns = 5` if the FPS allows.
 2. Run **Biobuzz: Pollen/Nectar Hunt** (Autonomous). Choose `TARGET_MODE` (`POLLEN`,
    `NECTAR`, `EITHER`) and adjust the tuning constants at the top of `PollenNectarAuto.java`.
 3. Add your real parking path in `park()`.
+
+### Finding HSV ranges
+
+OpenCV HSV uses H 0–180, S 0–255, V 0–255. Some starting points:
+
+| Color | Low (H, S, V) | High (H, S, V) |
+|---|---|---|
+| Yellow | 15, 100, 100 | 35, 255, 255 |
+| Orange | 5, 120, 100 | 18, 255, 255 |
+| Blue | 95, 120, 60 | 130, 255, 255 |
+| Purple | 130, 60, 60 | 160, 255, 255 |
+| Red (wraps around) | 0, 120, 70 → 8, 255, 255 **and** 170, 120, 70 → 180, 255, 255 |
+
+```java
+// In PollenNectarAuto and PollenNectarVisionTest, right after "new PollenNectarProcessor.Settings()":
+settings.candidateRanges.clear();
+settings.candidateRanges.add(new PollenNectarProcessor.HsvRange(15, 100, 100, 35, 255, 255)); // pollen
+settings.candidateRanges.add(new PollenNectarProcessor.HsvRange(95, 120, 60, 130, 255, 255)); // nectar
+```
 
 ### Tuning cheat sheet
 
 | Symptom | Change |
 |---|---|
-| Robot chases things that aren't there | Raise `minConfidence`, raise `CONFIRM_FRAMES`, add more Background images |
+| Robot chases things that aren't there | Capture them and add them to *Other*; raise `minMargin` / `CONFIRM_FRAMES` |
+| Misses real targets | Check for a gray box first (color filter), then lower `minConfidence` |
 | Spins right past targets | Lower `MAX_TURN`, raise `SCAN_DWELL_S`, lower `SCAN_STEP_DEG` |
 | Wobbles while lining up | Lower `ALIGN_KP` / `APPROACH_STEER_KP`, raise `ALIGN_TOLERANCE` |
 | Stops too early / too late before collecting | Adjust `NEAR_Y`, `COLLECT_TIME_S` |

@@ -9,16 +9,25 @@ import org.firstinspires.ftc.robotcore.external.hardware.camera.WebcamName;
 import org.firstinspires.ftc.vision.VisionPortal;
 
 import java.util.List;
+import java.util.Locale;
 
 /**
- * Drive around with gamepad 1 and watch what the Teachable Machine model reports for every
- * grid cell. Use this to check the model, tune minConfidence, and find a good NEAR_Y value
- * (park the robot where it should start collecting and read the sighting's y).
+ * Drive around with gamepad 1, watch what the model reports, and collect training images.
+ *
+ *   Left stick      drive / strafe          Right stick X   turn
+ *   A               save this frame + every candidate crop to /sdcard/FIRST/biobuzz-captures/
+ *   B               toggle continuous capture (a set of crops every 10 frames)
+ *
+ * Gray boxes are candidates the color filter found; colored boxes are crops the model accepted
+ * as Pollen (yellow) or Nectar (cyan). Use this to tune minConfidence / candidateRanges and to
+ * find NEAR_Y (park where collecting should start and read the sighting's y).
  *
  * Camera stream: Driver Station menu -> Camera Stream (during INIT), or the Robot Controller screen.
  */
 @TeleOp(name = "Biobuzz: Vision Test", group = "Biobuzz")
 public class PollenNectarVisionTest extends LinearOpMode {
+
+    public static int CONTINUOUS_CAPTURE_EVERY_N_FRAMES = 10;
 
     @Override
     public void runOpMode() throws InterruptedException {
@@ -43,29 +52,40 @@ public class PollenNectarVisionTest extends LinearOpMode {
                 .build();
 
         telemetry.addData("Labels", vision.getLabels());
-        telemetry.addLine("Press START. Left stick = drive/strafe, right stick X = turn.");
+        telemetry.addLine("Press START. A = capture, B = toggle continuous capture.");
         telemetry.update();
         waitForStart();
 
         List<String> labels = vision.getLabels();
+        boolean lastA = false, lastB = false;
         while (opModeIsActive()) {
             drive.drive(-gamepad1.left_stick_y, gamepad1.left_stick_x, gamepad1.right_stick_x);
+
+            if (gamepad1.a && !lastA) vision.requestCapture();
+            if (gamepad1.b && !lastB) {
+                vision.setAutoCapture(vision.getAutoCapture() > 0 ? 0 : CONTINUOUS_CAPTURE_EVERY_N_FRAMES);
+            }
+            lastA = gamepad1.a;
+            lastB = gamepad1.b;
+
+            telemetry.addData("Images saved", "%d  (continuous %s)", vision.getCapturesSaved(),
+                    vision.getAutoCapture() > 0 ? "ON" : "off");
 
             PollenNectarProcessor.Result r = vision.getLatestResult();
             if (r == null) {
                 telemetry.addLine("Waiting for camera...");
             } else {
                 telemetry.addData("FPS", "%.1f", portal.getFps());
-                telemetry.addData("Result age", "%.0f ms", r.ageMillis());
+                telemetry.addData("Candidates", r.detections.size());
                 for (PollenNectarProcessor.Sighting s : r.sightings.values()) {
                     telemetry.addData("SIGHTING", s.toString());
                 }
-                for (PollenNectarProcessor.Cell cell : r.cells) {
-                    StringBuilder sb = new StringBuilder();
+                for (PollenNectarProcessor.Detection d : r.detections) {
+                    StringBuilder sb = new StringBuilder(d.isTarget ? "[TARGET] " : "");
                     for (int i = 0; i < labels.size(); i++) {
-                        sb.append(String.format("%s %.0f%%  ", labels.get(i), cell.scores[i] * 100));
+                        sb.append(String.format(Locale.US, "%s %.0f%%  ", labels.get(i), d.scores[i] * 100));
                     }
-                    telemetry.addData("Cell c" + cell.column + " r" + cell.row, sb.toString());
+                    telemetry.addData("@" + d.blob.x + "," + d.blob.y, sb.toString());
                 }
             }
             telemetry.update();
