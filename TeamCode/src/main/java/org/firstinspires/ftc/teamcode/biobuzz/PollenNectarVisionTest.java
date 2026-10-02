@@ -17,10 +17,12 @@ import java.util.Locale;
  *   Left stick      drive / strafe          Right stick X   turn
  *   A               save this frame + every candidate crop to /sdcard/FIRST/biobuzz-captures/
  *   B               toggle continuous capture (a set of crops every 10 frames)
+ *   X               switch alliance (RED / BLUE)
  *
- * Gray boxes are candidates the color filter found; colored boxes are crops the model accepted
- * as Pollen (yellow) or Nectar (cyan). Use this to tune minConfidence / candidateRanges and to
- * find NEAR_Y (park where collecting should start and read the sighting's y).
+ * Gray boxes are candidates the color filter found that the model rejected. Yellow / red / blue
+ * boxes are targets. Crossed-out boxes marked AVOID are the opposing alliance's nectar.
+ * Use this to tune the HSV ranges and minConfidence, and to find NEAR_Y and INTAKE_ZONE_Y
+ * (park where collecting should start and read the sighting's y).
  *
  * Camera stream: Driver Station menu -> Camera Stream (during INIT), or the Robot Controller screen.
  */
@@ -34,6 +36,8 @@ public class PollenNectarVisionTest extends LinearOpMode {
         MecanumDrive drive = new MecanumDrive(hardwareMap);
 
         PollenNectarProcessor.Settings settings = new PollenNectarProcessor.Settings();
+        settings.pollenLabel = PollenNectarAuto.POLLEN_LABEL;
+        settings.nectarLabel = PollenNectarAuto.NECTAR_LABEL;
         PollenNectarProcessor vision;
         try {
             vision = new PollenNectarProcessor(hardwareMap.appContext, settings);
@@ -52,12 +56,12 @@ public class PollenNectarVisionTest extends LinearOpMode {
                 .build();
 
         telemetry.addData("Labels", vision.getLabels());
-        telemetry.addLine("Press START. A = capture, B = toggle continuous capture.");
+        telemetry.addLine("Press START. A = capture, B = continuous capture, X = alliance.");
         telemetry.update();
         waitForStart();
 
         List<String> labels = vision.getLabels();
-        boolean lastA = false, lastB = false;
+        boolean lastA = false, lastB = false, lastX = false;
         while (opModeIsActive()) {
             drive.drive(-gamepad1.left_stick_y, gamepad1.left_stick_x, gamepad1.right_stick_x);
 
@@ -65,9 +69,15 @@ public class PollenNectarVisionTest extends LinearOpMode {
             if (gamepad1.b && !lastB) {
                 vision.setAutoCapture(vision.getAutoCapture() > 0 ? 0 : CONTINUOUS_CAPTURE_EVERY_N_FRAMES);
             }
+            if (gamepad1.x && !lastX) {
+                vision.setAlliance(vision.getAlliance() == PollenNectarProcessor.Alliance.RED
+                        ? PollenNectarProcessor.Alliance.BLUE : PollenNectarProcessor.Alliance.RED);
+            }
+            lastX = gamepad1.x;
             lastA = gamepad1.a;
             lastB = gamepad1.b;
 
+            telemetry.addData("Alliance", vision.getAlliance());
             telemetry.addData("Images saved", "%d  (continuous %s)", vision.getCapturesSaved(),
                     vision.getAutoCapture() > 0 ? "ON" : "off");
 
@@ -78,10 +88,13 @@ public class PollenNectarVisionTest extends LinearOpMode {
                 telemetry.addData("FPS", "%.1f", portal.getFps());
                 telemetry.addData("Candidates", r.detections.size());
                 for (PollenNectarProcessor.Sighting s : r.sightings.values()) {
-                    telemetry.addData("SIGHTING", s.toString());
+                    telemetry.addData("TARGET", s.toString());
+                }
+                for (PollenNectarProcessor.Sighting h : r.hazards) {
+                    telemetry.addData("AVOID", h.toString());
                 }
                 for (PollenNectarProcessor.Detection d : r.detections) {
-                    StringBuilder sb = new StringBuilder(d.isTarget ? "[TARGET] " : "");
+                    StringBuilder sb = new StringBuilder(d.color + " " + d.role + ": ");
                     for (int i = 0; i < labels.size(); i++) {
                         sb.append(String.format(Locale.US, "%s %.0f%%  ", labels.get(i), d.scores[i] * 100));
                     }

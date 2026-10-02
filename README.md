@@ -1,8 +1,9 @@
 # Biobuzz – FTC Pollen & Nectar Hunter
 
 Autonomous code for an FTC robot with a **four-wheel mecanum drive** that uses a model trained in
-[Google Teachable Machine](https://teachablemachine.withgoogle.com/) to find pollen and/or nectar
-on the field, drive to it, and collect it.
+[Google Teachable Machine](https://teachablemachine.withgoogle.com/) to find **pollen (yellow)** and
+**our alliance's nectar (red or blue)** on the field, drive to it and collect it, while steering
+clear of the other alliance's nectar, which we are not allowed to possess.
 
 Everything lives in `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/`. Copy that
 folder into the `TeamCode` module of your
@@ -11,7 +12,8 @@ folder into the `TeamCode` module of your
 
 | File | What it does |
 |---|---|
-| `PollenNectarAuto.java` | **The autonomous.** Search, align, approach, collect, repeat |
+| `PollenNectarAutoRed.java` / `PollenNectarAutoBlue.java` | **The autonomous OpModes.** Pick the one for your alliance |
+| `PollenNectarAuto.java` | Shared autonomous logic and tuning: search, align, approach, avoid, collect, repeat |
 | `PollenNectarVisionTest.java` | TeleOp: watch the model's output, tune it, and **capture training images** |
 | `PollenNectarProcessor.java` | VisionPortal processor: color filter → crop → classify → target positions |
 | `TeachableMachineClassifier.java` | Loads and runs the Teachable Machine `.tflite` model |
@@ -33,14 +35,24 @@ whole scene**:
                   colored blobs   each blob
 ```
 
-1. **Propose:** FTC tiles are gray, so a cheap HSV color filter picks out colored blobs as
-   candidates. By default it takes anything clearly colored. Narrow `candidateRanges` once you
-   know the game pieces' colors.
+1. **Propose:** FTC tiles are gray, so cheap HSV color masks pick out **yellow**, **red** and
+   **blue** blobs as candidates. Everything else is thrown away before the model runs.
 2. **Crop:** each blob is cut out as a tight square with a little padding. The object fills
    most of the crop, so whatever is behind it barely affects the result.
 3. **Classify:** the model only has to answer "is this blob Pollen, Nectar, or Other?" *Other*
    only needs to cover things that pass the color filter (robot parts, alliance tape, field
    elements), which is a much smaller set than "the whole field".
+4. **Apply alliance rules:** the blob's color decides what a detection means:
+
+   | Model says | Blob color | Result |
+   |---|---|---|
+   | Pollen | yellow | **Target** |
+   | Nectar | our alliance's color | **Target** |
+   | Nectar | the other alliance's color | **Hazard**: never collect, steer around it |
+   | anything else | any | ignored |
+
+   The model doesn't have to tell red nectar from blue nectar. The color mask already knows, so
+   the **Nectar** class is trained with both colors. That gives it twice the examples.
 
 A crop counts only if its top label scores at least `minConfidence` **and** beats the
 runner-up by `minMargin`. If the model is unsure, the crop is ignored rather than chased.
@@ -55,13 +67,31 @@ Each sighting gives:
 
 If there are several of the same target, it goes for the closest one.
 
+### Staying away from the other alliance's nectar
+
+Being cautious costs less than a possession penalty, so opposing nectar only needs a Nectar
+score of `hazardConfidence` (0.4) to count as a hazard. Targets need 0.75 plus a clear margin.
+
+* **On the way to a target:** if opposing nectar sits between the robot and the target (closer
+  than the target and within `PATH_HALF_WIDTH` of the straight-line path), the robot stops
+  driving forward. It **strafes sideways** away from the hazard while keeping the camera on the
+  target. If it can't get around within `AVOID_TIMEOUT_S`, it gives up on that target.
+* **Right in front of the intake** (below `INTAKE_ZONE_Y`, in the robot's path): the robot won't
+  start collecting. If it's already collecting, it runs the **intake in reverse** and backs
+  away (`EJECT`). The robot keeps remembering the hazard for `HAZARD_MEMORY_S` after it slides
+  out of the camera's view underneath the robot.
+* **Search legs** end early if opposing nectar appears in front of the intake.
+
 ### Autonomous state machine
 
 ```
 SEARCH ──seen──▶ ALIGN ──centered──▶ APPROACH ──close──▶ COLLECT ─▶ BACK_OFF ─▶ TURN_AWAY ─┐
-  ▲  turn 30°, pause, look;   │ lost           │ lost / timeout                              │
-  │  after 360° drive a leg   ▼                ▼                                             │
-  └───────────────────────────┴────────────────┴─────────────────────────────────────────────┘
+  ▲  turn 30°, pause, look;   │ lost           │  ▲ │                 │                       │
+  │  after 360° drive a leg   │                │  │ ▼ opposing nectar │ opposing nectar       │
+  │                           │                │ strafe around it     ▼ at the intake         │
+  │                           │                │ (gives up after 2 s) EJECT (intake reverse)  │
+  │                           ▼                ▼ lost / timeout       └──────▶ TURN_AWAY ─────┤
+  └───────────────────────────┴────────────────┴──────────────────────────────────────────────┘
                      time up or enough collected ─▶ PARK ─▶ DONE
 ```
 
@@ -79,9 +109,9 @@ field. The vision test OpMode saves those crops for you.
 2. Create these classes. **The names must match** `POLLEN_LABEL` / `NECTAR_LABEL` in
    `PollenNectarAuto.java` (not case-sensitive):
    * `Pollen`
-   * `Nectar`
-   * `Other`: anything colored that *isn't* a target, such as robot parts, alliance-colored
-     tape and field elements, bumpers, and the edges of other game pieces.
+   * `Nectar`: **both red and blue** nectar in the same class
+   * `Other`: yellow, red or blue things that *aren't* pollen or nectar, such as alliance
+     tape, bumpers, red/blue field elements, robot parts and signs at the wall.
 3. For a first model you can take close-up photos with a laptop webcam, holding each piece
    so it fills most of the square preview. Vary the angle, distance, lighting and what's
    behind it.
@@ -98,7 +128,8 @@ This is how the model keeps up with a changing field:
    `PollenNectarAuto.java` so the auto collects crops while it runs.
 2. Pull the images off the Control Hub:
    `adb pull /sdcard/FIRST/biobuzz-captures/ ./captures`
-3. Sort the `*_crop*.png` files into Pollen / Nectar / Other folders. These are exactly the
+3. Sort the crop files into Pollen / Nectar / Other folders. They are named by the color
+   mask that found them (`*_yellow0.png`, `*_red1.png`, `*_blue2.png`). These are exactly the
    224×224 crops the model sees. Pay attention to the **mistakes**. Every false
    detection you put into *Other* teaches the model something new.
 4. Upload each folder to its class in Teachable Machine. Use **Save project to Drive** so
@@ -136,6 +167,10 @@ dependencies {
 
 ## 4. Robot configuration
 
+Run **Biobuzz: Hunt - RED** or **Biobuzz: Hunt - BLUE** to match your alliance. Check the alliance
+on the Driver Station telemetry during INIT.
+
+
 | Device | Name in config |
 |---|---|
 | Front-left / front-right / back-left / back-right motors | `frontLeft`, `frontRight`, `backLeft`, `backRight` |
@@ -152,43 +187,52 @@ mounted. If the robot doesn't drive forward on `drive(1, 0, 0)`, flip the motor 
 ## 5. Test, tune, run
 
 1. Run **Biobuzz: Vision Test** (TeleOp). Open the camera stream on the Driver Station during
-   INIT, or watch the Robot Controller screen. **Gray boxes** are candidates from the color
-   filter. **Yellow and cyan boxes** are crops the model accepted as Pollen or Nectar.
-   * **A target has no box at all:** the color filter missed it. Widen `candidateRanges` or
-     lower `minCandidateArea`.
-   * **Too many gray boxes (low FPS):** narrow `candidateRanges` to the game pieces' colors,
-     or lower `maxCandidates`. Each candidate costs one model run.
+   INIT, or watch the Robot Controller screen. Press **X** to switch alliance.
+   * **Gray box:** the color mask found it, but the model said it isn't a game piece.
+   * **Yellow / red / blue box:** a target.
+   * **Crossed-out box marked AVOID:** the other alliance's nectar.
+   * **A game piece has no box at all:** the color mask missed it. Adjust its HSV range (see
+     below) or lower `minCandidateArea`. **Check this at every venue.** Lighting changes colors.
+   * **Too many gray boxes (low FPS):** tighten the HSV ranges or lower `maxCandidates`. Each
+     candidate costs one model run.
    * **Wrong labels:** capture with **A**, add those crops to the right class, retrain.
    * Park the robot where collecting should start and note the sighting's `y`. Use that as
-     `NEAR_Y`.
-2. Run **Biobuzz: Pollen/Nectar Hunt** (Autonomous). Choose `TARGET_MODE` (`POLLEN`,
+     `NEAR_Y`. Put opposing nectar just in front of the intake and check that its `y` is at least
+     `INTAKE_ZONE_Y`. Also check that `PATH_HALF_WIDTH` roughly covers the intake's width.
+2. Run **Biobuzz: Hunt - RED** or **Biobuzz: Hunt - BLUE** (Autonomous). Choose `TARGET_MODE` (`POLLEN`,
    `NECTAR`, `EITHER`) and adjust the tuning constants at the top of `PollenNectarAuto.java`.
 3. Add your real parking path in `park()`.
 
-### Finding HSV ranges
+### Adjusting HSV ranges
 
-OpenCV HSV uses H 0–180, S 0–255, V 0–255. Some starting points:
+The defaults in `PollenNectarProcessor.Settings` (OpenCV scale: H 0–180, S 0–255, V 0–255) are:
 
 | Color | Low (H, S, V) | High (H, S, V) |
 |---|---|---|
-| Yellow | 15, 100, 100 | 35, 255, 255 |
-| Orange | 5, 120, 100 | 18, 255, 255 |
-| Blue | 95, 120, 60 | 130, 255, 255 |
-| Purple | 130, 60, 60 | 160, 255, 255 |
-| Red (wraps around) | 0, 120, 70 → 8, 255, 255 **and** 170, 120, 70 → 180, 255, 255 |
+| Yellow (pollen) | 15, 100, 100 | 35, 255, 255 |
+| Red (nectar) | 0, 120, 70 | 8, 255, 255 |
+| Red, second range (red wraps around the hue circle) | 170, 120, 70 | 180, 255, 255 |
+| Blue (nectar) | 95, 120, 60 | 130, 255, 255 |
+
+To change them, add lines like these in `PollenNectarAuto.runOpMode()` and
+`PollenNectarVisionTest`, right after `new PollenNectarProcessor.Settings()`:
 
 ```java
-// In PollenNectarAuto and PollenNectarVisionTest, right after "new PollenNectarProcessor.Settings()":
-settings.candidateRanges.clear();
-settings.candidateRanges.add(new PollenNectarProcessor.HsvRange(15, 100, 100, 35, 255, 255)); // pollen
-settings.candidateRanges.add(new PollenNectarProcessor.HsvRange(95, 120, 60, 130, 255, 255)); // nectar
+settings.yellowRanges.clear();
+settings.yellowRanges.add(new PollenNectarProcessor.HsvRange(18, 90, 90, 32, 255, 255));
 ```
+
+If dim yellow pieces are missed, lower the yellow S/V minimums. If orange-ish red
+pieces show up as yellow, raise the yellow H minimum.
 
 ### Tuning cheat sheet
 
 | Symptom | Change |
 |---|---|
 | Robot chases things that aren't there | Capture them and add them to *Other*; raise `minMargin` / `CONFIRM_FRAMES` |
+| Robot touches opposing nectar | Raise `PATH_HALF_WIDTH`, lower `INTAKE_ZONE_Y`, lower `hazardConfidence` |
+| Robot avoids things that aren't opposing nectar | Add them to *Other*; raise `hazardConfidence` slightly |
+| Robot gives up on targets too easily | Raise `AVOID_TIMEOUT_S`, lower `PATH_HALF_WIDTH` |
 | Misses real targets | Check for a gray box first (color filter), then lower `minConfidence` |
 | Spins right past targets | Lower `MAX_TURN`, raise `SCAN_DWELL_S`, lower `SCAN_STEP_DEG` |
 | Wobbles while lining up | Lower `ALIGN_KP` / `APPROACH_STEER_KP`, raise `ALIGN_TOLERANCE` |
